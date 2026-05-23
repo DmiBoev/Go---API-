@@ -15,8 +15,7 @@ REST API для управления организационной структ
 
 ```bash
 # Клонировать репозиторий
-git clone <your-repo-url>
-cd <project-folder>
+git clone https://github.com/DmiBoev/Go---API-.git
 
 # Запустить приложение (фоновый режим)
 docker-compose up --build -d
