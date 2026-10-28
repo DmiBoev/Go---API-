@@ -2,11 +2,13 @@ package config
 
 import (
 	"os"
+	"strings"
 )
 
 type Config struct {
-	DatabaseURL string
-	Port        string
+	DatabaseURL        string
+	Port               string
+	CORSAllowedOrigins []string
 }
 
 func Load() *Config {
@@ -18,8 +20,13 @@ func Load() *Config {
 	if port == "" {
 		port = ":8080"
 	}
+	origins := os.Getenv("CORS_ALLOWED_ORIGINS")
+	if origins == "" {
+		origins = "*"
+	}
 	return &Config{
-		DatabaseURL: dbURL,
-		Port:        port,
+		DatabaseURL:        dbURL,
+		Port:               port,
+		CORSAllowedOrigins: strings.Split(origins, ","),
 	}
 }
