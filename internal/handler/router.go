@@ -1,6 +1,9 @@
 package handler
 
-import "net/http"
+import (
+	"dept-api/docs"
+	"net/http"
+)
 
 // NewRouter is shared by the production server and HTTP integration tests.
 func NewRouter(h *DepartmentHandler) *http.ServeMux {
@@ -10,5 +13,6 @@ func NewRouter(h *DepartmentHandler) *http.ServeMux {
 	mux.HandleFunc("GET /departments/{id}", h.GetDepartment)
 	mux.HandleFunc("PATCH /departments/{id}", h.UpdateDepartment)
 	mux.HandleFunc("DELETE /departments/{id}", h.DeleteDepartment)
+	docs.Register(mux)
 	return mux
 }

@@ -1,0 +1,320 @@
+openapi: 3.0.3
+info:
+  title: Department Management API
+  version: 1.0.0
+  description: |
+    Manage a department tree and its employees. Department names are unique
+    among siblings, including root departments. Mutations use PostgreSQL
+    constraints and transactions; moving a department into a descendant is rejected.
+servers:
+  - url: /
+tags:
+  - name: Departments
+  - name: Employees
+paths:
+  /departments/:
+    post:
+      tags: [Departments]
+      operationId: createDepartment
+      summary: Create a department
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDepartment'
+            example:
+              name: Engineering
+              parent_id: null
+      responses:
+        '201':
+          description: Department created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Department'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /departments/{id}/employees/:
+    parameters:
+      - $ref: '#/components/parameters/DepartmentID'
+    post:
+      tags: [Employees]
+      operationId: createEmployee
+      summary: Create an employee in a department
+      description: |
+        hired_at accepts an RFC 3339 timestamp and is stored as a PostgreSQL DATE.
+        Use midnight UTC when supplying a calendar date.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEmployee'
+            example:
+              full_name: Ivan Petrov
+              position: Developer
+              hired_at: '2023-01-15T00:00:00Z'
+      responses:
+        '201':
+          description: Employee created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Employee'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /departments/{id}:
+    parameters:
+      - $ref: '#/components/parameters/DepartmentID'
+    get:
+      tags: [Departments]
+      operationId: getDepartment
+      summary: Get a department and its descendants
+      parameters:
+        - name: depth
+          in: query
+          description: Tree depth including the root. Out-of-range or nonnumeric values use 1.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5
+            default: 1
+        - name: include_employees
+          in: query
+          description: Only the literal value false disables employees at all returned levels.
+          schema:
+            type: boolean
+            default: true
+      responses:
+        '200':
+          description: Department tree; empty employees and children arrays are omitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Department'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [Departments]
+      operationId: updateDepartment
+      summary: Rename or move a department
+      description: |
+        Omitted fields leave their values unchanged. A null name or parent_id
+        also leaves the field unchanged. Moving a department into itself or
+        its descendants is rejected. The cycle check and update share one transaction.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateDepartment'
+            example:
+              name: Platform
+              parent_id: 2
+      responses:
+        '200':
+          description: Updated department
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Department'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [Departments]
+      operationId: deleteDepartment
+      summary: Delete a department
+      description: |
+        cascade deletes the entire subtree and its employees.
+        reassign moves only this department's employees to the target, promotes
+        its immediate children to its parent (or to roots), then deletes it.
+        The target may be a descendant because children are promoted first.
+        Any conflict rolls back all changes, including employee reassignment.
+      parameters:
+        - name: mode
+          in: query
+          schema:
+            type: string
+            enum: [cascade, reassign]
+            default: cascade
+        - name: reassign_to_department_id
+          in: query
+          description: Required for reassign; must identify an existing, different department.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '204':
+          description: Department deleted; empty response body
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+components:
+  parameters:
+    DepartmentID:
+      name: id
+      in: path
+      required: true
+      description: Positive department ID
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+  schemas:
+    CreateDepartment:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Trimmed before validation; whitespace-only names are rejected.
+        parent_id:
+          type: integer
+          format: int64
+          minimum: 1
+          nullable: true
+          description: Null or omitted creates a root department.
+    UpdateDepartment:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          nullable: true
+        parent_id:
+          type: integer
+          format: int64
+          minimum: 1
+          nullable: true
+    CreateEmployee:
+      type: object
+      required: [full_name, position]
+      properties:
+        full_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Trimmed before validation; whitespace-only values are rejected.
+        position:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Trimmed before validation; whitespace-only values are rejected.
+        hired_at:
+          type: string
+          format: date-time
+          nullable: true
+    Department:
+      type: object
+      required: [id, name, parent_id, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+          minimum: 1
+        name:
+          type: string
+        parent_id:
+          type: integer
+          format: int64
+          minimum: 1
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        employees:
+          type: array
+          items:
+            $ref: '#/components/schemas/Employee'
+        children:
+          type: array
+          items:
+            $ref: '#/components/schemas/Department'
+    Employee:
+      type: object
+      required: [id, department_id, full_name, position, hired_at, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+          minimum: 1
+        department_id:
+          type: integer
+          format: int64
+          minimum: 1
+        full_name:
+          type: string
+        position:
+          type: string
+        hired_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+      example:
+        error: 'not found: department not found'
+  responses:
+    BadRequest:
+      description: Invalid JSON, ID, field value, or deletion mode
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Department, parent, or reassignment target not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: Duplicate sibling name, cyclic move, or conflicting child promotion
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: Unexpected server error; internal details are logged, not returned
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: Internal server error
