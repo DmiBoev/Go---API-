@@ -9,6 +9,6 @@ FROM alpine:latest
 RUN apk --no-cache add ca-certificates
 WORKDIR /root/
 COPY --from=builder /app/bin/app .
-COPY migrations ./migrations
+# SQL migrations are embedded in the binary.
 EXPOSE 8080
 CMD ["./app"]

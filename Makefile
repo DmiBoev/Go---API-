@@ -1,17 +1,21 @@
-.PHONY: up down test test-local clean
+.PHONY: up down test integration test-docker clean
 
 up:
-	docker-compose up --build -d
+	docker compose up --build -d
 
 down:
-	docker-compose down -v
+	docker compose down
 
 test:
-	docker-compose --profile test run --rm test
+	go test ./...
 
-test-local:
-	DATABASE_URL="host=localhost user=postgres password=secretpassword dbname=department_management_test port=5433 sslmode=disable" go test -v ./...
+integration:
+	go test -tags=integration -count=1 -timeout=5m ./...
+
+# The trap preserves the test exit status and cleans up only the test project.
+test-docker:
+	@trap 'docker compose -p dept-api-tests -f docker-compose.test.yml down --volumes' EXIT; \
+	docker compose -p dept-api-tests -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from test
 
 clean:
-	docker-compose down -v
-	rm -rf tmp/
+	docker compose -p dept-api-tests -f docker-compose.test.yml down --volumes

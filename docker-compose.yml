@@ -1,9 +1,6 @@
-version: '3.8'
-
 services:
   db:
     image: postgres:15-alpine
-    container_name: dept_postgres_db
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: secretpassword
@@ -18,47 +15,16 @@ services:
       timeout: 5s
       retries: 5
 
-  test_db:
-    image: postgres:15-alpine
-    container_name: dept_test_db
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: secretpassword
-      POSTGRES_DB: department_management_test
-    ports:
-      - "5433:5432"  # используем другой порт, чтобы не конфликтовать с основной БД
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d department_management_test"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   app:
     build: .
-    container_name: dept_go_app
     ports:
       - "8080:8080"
     environment:
-      DATABASE_URL: "host=db user=postgres password=secretpassword dbname=department_management port=5432 sslmode=disable"
+      DATABASE_URL: "postgres://postgres:secretpassword@db:5432/department_management?sslmode=disable"
+      CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS:-*}"
     depends_on:
       db:
         condition: service_healthy
-
-  # Сервис для запуска тестов
-  test:
-    build:
-      context: .
-      target: builder   # используем промежуточный этап из Dockerfile
-    container_name: dept_test_runner
-    environment:
-      DATABASE_URL: "host=test_db user=postgres password=secretpassword dbname=department_management_test port=5432 sslmode=disable"
-    depends_on:
-      test_db:
-        condition: service_healthy
-    command: ["go", "test", "-v", "./..."]
-    # не держим контейнер запущенным после тестов
-    profiles:
-      - test
 
 volumes:
   pgdata:

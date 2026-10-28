@@ -5,6 +5,7 @@ package repository
 import (
 	"context"
 	"dept-api/internal/models"
+	"os"
 	"testing"
 
 	"dept-api/internal/testutil"
@@ -88,6 +89,10 @@ func TestDepartmentRepository_ReassignEmployees(t *testing.T) {
 	err := deptRepo.ReassignEmployees(ctx, fromDept.ID, toDept.ID)
 	require.NoError(t, err)
 
-	empAfter, _ := empRepo.GetByID(ctx, emp.ID)
+	empAfter, err := empRepo.GetByID(ctx, emp.ID)
+	require.NoError(t, err)
+	require.NotNil(t, empAfter)
 	assert.Equal(t, toDept.ID, empAfter.DepartmentID)
 }
+
+func TestMain(m *testing.M) { os.Exit(testutil.Run(m)) }

@@ -1,0 +1,26 @@
+# Separate project and no published ports: tests cannot touch the application DB.
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: department_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d department_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  test:
+    build:
+      context: .
+      target: builder
+    environment:
+      TEST_DATABASE_URL: "postgres://postgres:test@db:5432/department_test?sslmode=disable"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["go", "test", "-tags=integration", "-count=1", "-timeout=5m", "-v", "./..."]
