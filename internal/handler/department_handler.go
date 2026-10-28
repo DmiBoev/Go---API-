@@ -1,9 +1,12 @@
 package handler
 
 import (
+	"dept-api/internal/domain"
 	"dept-api/internal/models"
 	"dept-api/internal/service"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 )
@@ -19,8 +22,6 @@ func NewDepartmentHandler(deptService service.DepartmentService, empService serv
 		empService:  empService,
 	}
 }
-
-// respondWithError – утилита
 func respondWithError(w http.ResponseWriter, code int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -41,8 +42,7 @@ func (h *DepartmentHandler) CreateDepartment(w http.ResponseWriter, r *http.Requ
 	}
 	dept, err := h.deptService.Create(r.Context(), input)
 	if err != nil {
-		// Обработка ошибки уникальности можно по строке сообщения, но проще: если ошибка содержит "duplicate" - 400
-		respondWithError(w, http.StatusInternalServerError, err.Error())
+		respondServiceError(w, err)
 		return
 	}
 	respondWithJSON(w, http.StatusCreated, dept)
@@ -51,7 +51,7 @@ func (h *DepartmentHandler) CreateDepartment(w http.ResponseWriter, r *http.Requ
 func (h *DepartmentHandler) CreateEmployee(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	deptID, err := strconv.ParseUint(idStr, 10, 32)
-	if err != nil {
+	if err != nil || deptID == 0 {
 		respondWithError(w, http.StatusBadRequest, "Invalid department ID")
 		return
 	}
@@ -62,7 +62,7 @@ func (h *DepartmentHandler) CreateEmployee(w http.ResponseWriter, r *http.Reques
 	}
 	emp, err := h.empService.Create(r.Context(), uint(deptID), input)
 	if err != nil {
-		respondWithError(w, http.StatusBadRequest, err.Error())
+		respondServiceError(w, err)
 		return
 	}
 	respondWithJSON(w, http.StatusCreated, emp)
@@ -71,7 +71,7 @@ func (h *DepartmentHandler) CreateEmployee(w http.ResponseWriter, r *http.Reques
 func (h *DepartmentHandler) GetDepartment(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	deptID, err := strconv.ParseUint(idStr, 10, 32)
-	if err != nil {
+	if err != nil || deptID == 0 {
 		respondWithError(w, http.StatusBadRequest, "Invalid department ID")
 		return
 	}
@@ -84,7 +84,7 @@ func (h *DepartmentHandler) GetDepartment(w http.ResponseWriter, r *http.Request
 	includeEmployees := r.URL.Query().Get("include_employees") != "false"
 	dept, err := h.deptService.GetByID(r.Context(), uint(deptID), depth, includeEmployees)
 	if err != nil {
-		respondWithError(w, http.StatusNotFound, err.Error())
+		respondServiceError(w, err)
 		return
 	}
 	respondWithJSON(w, http.StatusOK, dept)
@@ -93,7 +93,7 @@ func (h *DepartmentHandler) GetDepartment(w http.ResponseWriter, r *http.Request
 func (h *DepartmentHandler) UpdateDepartment(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	deptID, err := strconv.ParseUint(idStr, 10, 32)
-	if err != nil {
+	if err != nil || deptID == 0 {
 		respondWithError(w, http.StatusBadRequest, "Invalid department ID")
 		return
 	}
@@ -104,15 +104,7 @@ func (h *DepartmentHandler) UpdateDepartment(w http.ResponseWriter, r *http.Requ
 	}
 	dept, err := h.deptService.Update(r.Context(), uint(deptID), input)
 	if err != nil {
-		status := http.StatusInternalServerError
-		if err.Error() == "department not found" {
-			status = http.StatusNotFound
-		} else if err.Error() == "department cannot be its own parent" || err.Error() == "new parent not found" {
-			status = http.StatusBadRequest
-		} else if err.Error() == "cannot move department inside its own descendant" {
-			status = http.StatusConflict
-		}
-		respondWithError(w, status, err.Error())
+		respondServiceError(w, err)
 		return
 	}
 	respondWithJSON(w, http.StatusOK, dept)
@@ -121,7 +113,7 @@ func (h *DepartmentHandler) UpdateDepartment(w http.ResponseWriter, r *http.Requ
 func (h *DepartmentHandler) DeleteDepartment(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	deptID, err := strconv.ParseUint(idStr, 10, 32)
-	if err != nil {
+	if err != nil || deptID == 0 {
 		respondWithError(w, http.StatusBadRequest, "Invalid department ID")
 		return
 	}
@@ -143,8 +135,22 @@ func (h *DepartmentHandler) DeleteDepartment(w http.ResponseWriter, r *http.Requ
 	}
 	err = h.deptService.Delete(r.Context(), uint(deptID), mode, reassignTo)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, err.Error())
+		respondServiceError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func respondServiceError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, domain.ErrInvalid):
+		respondWithError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, domain.ErrNotFound):
+		respondWithError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, domain.ErrConflict):
+		respondWithError(w, http.StatusConflict, err.Error())
+	default:
+		slog.Error("request failed", "error", err)
+		respondWithError(w, http.StatusInternalServerError, "Internal server error")
+	}
 }

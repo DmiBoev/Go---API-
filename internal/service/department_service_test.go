@@ -1,30 +1,27 @@
+//go:build integration
+
 package service
 
 import (
 	"context"
+	"dept-api/internal/domain"
 	"dept-api/internal/models"
 	"dept-api/internal/repository"
 	"testing"
 
+	"dept-api/internal/testutil"
+	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
 )
 
-func setupServiceTestDB(t *testing.T) *gorm.DB {
-	dsn := "host=localhost user=postgres password=secretpassword dbname=department_management_test port=5432 sslmode=disable"
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	require.NoError(t, err)
-	db.Exec("TRUNCATE TABLE employees, departments RESTART IDENTITY CASCADE")
-	return db
-}
+func setupServiceTestDB(t *testing.T) *sqlx.DB { return testutil.NewDB(t) }
 
 func TestDepartmentService_CreateDuplicateName(t *testing.T) {
 	db := setupServiceTestDB(t)
 	deptRepo := repository.NewDepartmentRepository(db)
-	empRepo := repository.NewEmployeeRepository(db)
-	svc := NewDepartmentService(db, deptRepo, empRepo)
+
+	svc := NewDepartmentService(deptRepo)
 	ctx := context.Background()
 
 	input := models.CreateDepartmentInput{Name: "HR"}
@@ -38,8 +35,8 @@ func TestDepartmentService_CreateDuplicateName(t *testing.T) {
 func TestDepartmentService_UpdateCycle(t *testing.T) {
 	db := setupServiceTestDB(t)
 	deptRepo := repository.NewDepartmentRepository(db)
-	empRepo := repository.NewEmployeeRepository(db)
-	svc := NewDepartmentService(db, deptRepo, empRepo)
+
+	svc := NewDepartmentService(deptRepo)
 	ctx := context.Background()
 
 	// Создаём A и B
@@ -53,14 +50,14 @@ func TestDepartmentService_UpdateCycle(t *testing.T) {
 
 	// Пытаемся переместить B в A (цикл)
 	_, err = svc.Update(ctx, b.ID, models.UpdateDepartmentInput{ParentID: &a.ID})
-	assert.EqualError(t, err, "cannot move department inside its own descendant")
+	assert.ErrorIs(t, err, domain.ErrConflict)
 }
 
 func TestDepartmentService_DeleteReassign(t *testing.T) {
 	db := setupServiceTestDB(t)
 	deptRepo := repository.NewDepartmentRepository(db)
 	empRepo := repository.NewEmployeeRepository(db)
-	svc := NewDepartmentService(db, deptRepo, empRepo)
+	svc := NewDepartmentService(deptRepo)
 	ctx := context.Background()
 
 	parent, _ := svc.Create(ctx, models.CreateDepartmentInput{Name: "Parent"})

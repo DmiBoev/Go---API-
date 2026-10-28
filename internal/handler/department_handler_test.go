@@ -1,3 +1,5 @@
+//go:build integration
+
 package handler
 
 import (
@@ -10,27 +12,19 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"dept-api/internal/testutil"
+	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
 )
 
-func setupTestDB(t *testing.T) *gorm.DB {
-	// Используем строку подключения (лучше через переменную окружения)
-	dsn := "host=localhost user=postgres password=secretpassword dbname=department_management_test port=5432 sslmode=disable"
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	require.NoError(t, err)
-	// Очистка таблиц
-	db.Exec("TRUNCATE TABLE employees, departments RESTART IDENTITY CASCADE")
-	return db
-}
+func setupTestDB(t *testing.T) *sqlx.DB { return testutil.NewDB(t) }
 
 func TestCreateDepartment(t *testing.T) {
 	db := setupTestDB(t)
 	deptRepo := repository.NewDepartmentRepository(db)
 	empRepo := repository.NewEmployeeRepository(db)
-	deptService := service.NewDepartmentService(db, deptRepo, empRepo)
+	deptService := service.NewDepartmentService(deptRepo)
 	empService := service.NewEmployeeService(empRepo, deptRepo)
 	handler := NewDepartmentHandler(deptService, empService)
 

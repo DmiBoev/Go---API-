@@ -5,7 +5,7 @@ REST API для управления организационной структ
 ## Технологии
 
 - Go 1.25.7, `net/http`
-- GORM (ORM), PostgreSQL
+- `database/sql` + `sqlx`, PostgreSQL
 - Goose (миграции)
 - Docker, docker-compose
 
@@ -56,3 +56,4 @@ curl -X DELETE "http://localhost:8080/departments/1?mode=cascade"
 
 # Удалить подразделение с переназначением сотрудников в другой отдел
 curl -X DELETE "http://localhost:8080/departments/2?mode=reassign&reassign_to_department_id=3"
+

@@ -2,112 +2,160 @@ package repository
 
 import (
 	"context"
+	"database/sql"
+	"dept-api/internal/domain"
 	"dept-api/internal/models"
 	"errors"
+	"fmt"
 
-	"gorm.io/gorm"
+	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 )
 
 type DepartmentRepository interface {
-	Create(ctx context.Context, dept *models.Department) error
-	GetByID(ctx context.Context, id uint) (*models.Department, error)
-	Update(ctx context.Context, dept *models.Department) error
-	Delete(ctx context.Context, id uint) error
-	GetChildren(ctx context.Context, parentID uint) ([]models.Department, error)
-	GetChildrenRecursive(ctx context.Context, parentID uint, depth int, includeEmployees bool) (*models.Department, error)
-	CheckCyclicMove(ctx context.Context, deptID, newParentID uint) (bool, error)
-	GetEmployeesByDepartment(ctx context.Context, deptID uint) ([]models.Employee, error)
-	ReassignEmployees(ctx context.Context, fromDeptID, toDeptID uint) error
-	ReassignChildrenParent(ctx context.Context, oldParentID, newParentID *uint) error // для reassign: поднять детей на уровень выше
+	Create(context.Context, *models.Department) error
+	GetByID(context.Context, uint) (*models.Department, error)
+	Update(context.Context, *models.Department) error
+	Delete(context.Context, uint) error
+	GetChildren(context.Context, uint) ([]models.Department, error)
+	GetChildrenRecursive(context.Context, uint, int, bool) (*models.Department, error)
+	CheckCyclicMove(context.Context, uint, uint) (bool, error)
+	GetEmployeesByDepartment(context.Context, uint) ([]models.Employee, error)
+	ReassignEmployees(context.Context, uint, uint) error
+	ReassignChildrenParent(context.Context, *uint, *uint) error
+	WithinTransaction(context.Context, func(DepartmentRepository) error) error
 }
 
-type departmentRepository struct {
-	db *gorm.DB
-}
+type departmentRepository struct{ db sqlx.ExtContext }
 
-func NewDepartmentRepository(db *gorm.DB) DepartmentRepository {
+func NewDepartmentRepository(db sqlx.ExtContext) DepartmentRepository {
 	return &departmentRepository{db: db}
 }
 
+// Every callback query uses the same transaction. The lock serializes hierarchy
+// mutations so concurrent moves cannot create a cycle.
+func (r *departmentRepository) WithinTransaction(ctx context.Context, fn func(DepartmentRepository) error) error {
+	db, ok := r.db.(*sqlx.DB)
+	if !ok {
+		return errors.New("nested department transactions are not supported")
+	}
+	tx, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "LOCK TABLE departments IN SHARE ROW EXCLUSIVE MODE"); err != nil {
+		return err
+	}
+	if err := fn(NewDepartmentRepository(tx)); err != nil {
+		return err
+	}
+	return databaseError(tx.Commit())
+}
+
+const departmentColumns = "id, name, parent_id, created_at"
+
 func (r *departmentRepository) Create(ctx context.Context, dept *models.Department) error {
-	return r.db.WithContext(ctx).Create(dept).Error
+	return databaseError(sqlx.GetContext(ctx, r.db, dept,
+		"INSERT INTO departments (name, parent_id) VALUES ($1, $2) RETURNING "+departmentColumns, dept.Name, dept.ParentID))
 }
 
 func (r *departmentRepository) GetByID(ctx context.Context, id uint) (*models.Department, error) {
 	var dept models.Department
-	err := r.db.WithContext(ctx).First(&dept, id).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	err := sqlx.GetContext(ctx, r.db, &dept, "SELECT "+departmentColumns+" FROM departments WHERE id = $1", id)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
-	return &dept, err
+	if err != nil {
+		return nil, err
+	}
+	return &dept, nil
 }
 
 func (r *departmentRepository) Update(ctx context.Context, dept *models.Department) error {
-	return r.db.WithContext(ctx).Save(dept).Error
+	return databaseError(sqlx.GetContext(ctx, r.db, dept,
+		"UPDATE departments SET name = $1, parent_id = $2 WHERE id = $3 RETURNING "+departmentColumns,
+		dept.Name, dept.ParentID, dept.ID))
 }
 
 func (r *departmentRepository) Delete(ctx context.Context, id uint) error {
-	return r.db.WithContext(ctx).Delete(&models.Department{}, id).Error
+	_, err := r.db.ExecContext(ctx, "DELETE FROM departments WHERE id = $1", id)
+	return databaseError(err)
 }
 
 func (r *departmentRepository) GetChildren(ctx context.Context, parentID uint) ([]models.Department, error) {
-	var children []models.Department
-	err := r.db.WithContext(ctx).Where("parent_id = ?", parentID).Order("id asc").Find(&children).Error
+	children := make([]models.Department, 0)
+	err := sqlx.SelectContext(ctx, r.db, &children, "SELECT "+departmentColumns+" FROM departments WHERE parent_id = $1 ORDER BY id", parentID)
 	return children, err
 }
 
-// GetChildrenRecursive строит дерево до определённой глубины
-func (r *departmentRepository) GetChildrenRecursive(ctx context.Context, parentID uint, depth int, includeEmployees bool) (*models.Department, error) {
-	var root models.Department
-	if err := r.db.WithContext(ctx).First(&root, parentID).Error; err != nil {
-		return nil, err
+func (r *departmentRepository) GetChildrenRecursive(ctx context.Context, id uint, depth int, includeEmployees bool) (*models.Department, error) {
+	root, err := r.GetByID(ctx, id)
+	if err != nil || root == nil {
+		return root, err
 	}
 	if includeEmployees {
-		r.db.Where("department_id = ?", parentID).Order("created_at asc").Find(&root.Employees)
+		root.Employees, err = r.GetEmployeesByDepartment(ctx, id)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if depth > 1 {
-		children, err := r.GetChildren(ctx, parentID)
+		children, err := r.GetChildren(ctx, id)
 		if err != nil {
 			return nil, err
 		}
 		for _, child := range children {
-			subTree, err := r.GetChildrenRecursive(ctx, child.ID, depth-1, includeEmployees)
+			subtree, err := r.GetChildrenRecursive(ctx, child.ID, depth-1, includeEmployees)
 			if err != nil {
-				continue
+				return nil, err
 			}
-			root.Children = append(root.Children, *subTree)
+			if subtree != nil {
+				root.Children = append(root.Children, *subtree)
+			}
 		}
 	}
-	return &root, nil
+	return root, nil
 }
 
-// CheckCyclicMove проверяет, не создаст ли перемещение цикла
 func (r *departmentRepository) CheckCyclicMove(ctx context.Context, deptID, newParentID uint) (bool, error) {
 	var exists bool
-	query := `
-        WITH RECURSIVE ancestors AS (
-            SELECT parent_id FROM departments WHERE id = ?
-            UNION ALL
-            SELECT d.parent_id FROM departments d
-            INNER JOIN ancestors a ON d.id = a.parent_id
-        )
-        SELECT EXISTS(SELECT 1 FROM ancestors WHERE parent_id = ?)
-    `
-	err := r.db.WithContext(ctx).Raw(query, newParentID, deptID).Scan(&exists).Error
+	err := sqlx.GetContext(ctx, r.db, &exists, `WITH RECURSIVE ancestors AS (
+  SELECT id, parent_id FROM departments WHERE id = $1
+  UNION
+  SELECT d.id, d.parent_id FROM departments d JOIN ancestors a ON d.id = a.parent_id
+ ) SELECT EXISTS (SELECT 1 FROM ancestors WHERE id = $2)`, newParentID, deptID)
 	return exists, err
 }
 
-func (r *departmentRepository) GetEmployeesByDepartment(ctx context.Context, deptID uint) ([]models.Employee, error) {
-	var employees []models.Employee
-	err := r.db.WithContext(ctx).Where("department_id = ?", deptID).Order("created_at asc").Find(&employees).Error
+func (r *departmentRepository) GetEmployeesByDepartment(ctx context.Context, id uint) ([]models.Employee, error) {
+	employees := make([]models.Employee, 0)
+	err := sqlx.SelectContext(ctx, r.db, &employees, "SELECT "+employeeColumns+" FROM employees WHERE department_id = $1 ORDER BY created_at, id", id)
 	return employees, err
 }
 
-func (r *departmentRepository) ReassignEmployees(ctx context.Context, fromDeptID, toDeptID uint) error {
-	return r.db.WithContext(ctx).Model(&models.Employee{}).Where("department_id = ?", fromDeptID).Update("department_id", toDeptID).Error
+func (r *departmentRepository) ReassignEmployees(ctx context.Context, from, to uint) error {
+	_, err := r.db.ExecContext(ctx, "UPDATE employees SET department_id = $1 WHERE department_id = $2", to, from)
+	return databaseError(err)
 }
 
-// ReassignChildrenParent поднимает детей удаляемого подразделения на уровень его родителя
-func (r *departmentRepository) ReassignChildrenParent(ctx context.Context, oldParentID, newParentID *uint) error {
-	return r.db.WithContext(ctx).Model(&models.Department{}).Where("parent_id = ?", oldParentID).Update("parent_id", newParentID).Error
+func (r *departmentRepository) ReassignChildrenParent(ctx context.Context, oldParent, newParent *uint) error {
+	_, err := r.db.ExecContext(ctx, "UPDATE departments SET parent_id = $1 WHERE parent_id = $2", newParent, oldParent)
+	return databaseError(err)
+}
+
+func databaseError(err error) error {
+	var pgErr *pq.Error
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return domain.ErrNotFound
+	case errors.As(err, &pgErr):
+		switch pgErr.Code {
+		case "23505":
+			return fmt.Errorf("%w: department name already exists under this parent", domain.ErrConflict)
+		case "23503":
+			return fmt.Errorf("%w: referenced department does not exist", domain.ErrInvalid)
+		}
+	}
+	return err
 }

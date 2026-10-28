@@ -1,3 +1,5 @@
+//go:build integration
+
 package repository
 
 import (
@@ -5,19 +7,13 @@ import (
 	"dept-api/internal/models"
 	"testing"
 
+	"dept-api/internal/testutil"
+	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
 )
 
-func setupRepoTestDB(t *testing.T) *gorm.DB {
-	dsn := "host=localhost user=postgres password=secretpassword dbname=department_management_test port=5432 sslmode=disable"
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	require.NoError(t, err)
-	db.Exec("TRUNCATE TABLE employees, departments RESTART IDENTITY CASCADE")
-	return db
-}
+func setupRepoTestDB(t *testing.T) *sqlx.DB { return testutil.NewDB(t) }
 
 func TestDepartmentRepository_CreateAndGet(t *testing.T) {
 	db := setupRepoTestDB(t)
@@ -39,7 +35,9 @@ func TestDepartmentRepository_UniqueConstraint(t *testing.T) {
 	repo := NewDepartmentRepository(db)
 	ctx := context.Background()
 
-	parentID := uint(0)
+	parent := &models.Department{Name: "Parent"}
+	require.NoError(t, repo.Create(ctx, parent))
+	parentID := parent.ID
 	dept1 := &models.Department{Name: "IT", ParentID: &parentID}
 	err := repo.Create(ctx, dept1)
 	require.NoError(t, err)
@@ -67,8 +65,8 @@ func TestDepartmentRepository_CheckCyclicMove(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, cyclic)
 
-	// Перемещение B внутрь C (допустимо)
-	cyclic, err = repo.CheckCyclicMove(ctx, b.ID, c.ID)
+	// Перемещение C внутрь A (допустимо)
+	cyclic, err = repo.CheckCyclicMove(ctx, c.ID, a.ID)
 	require.NoError(t, err)
 	assert.False(t, cyclic)
 }

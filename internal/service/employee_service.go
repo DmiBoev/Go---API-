@@ -4,7 +4,6 @@ import (
 	"context"
 	"dept-api/internal/models"
 	"dept-api/internal/repository"
-	"errors"
 )
 
 type EmployeeService interface {
@@ -25,9 +24,9 @@ func NewEmployeeService(empRepo repository.EmployeeRepository, deptRepo reposito
 
 func (s *employeeService) Create(ctx context.Context, deptID uint, input models.CreateEmployeeInput) (*models.Employee, error) {
 	// Проверяем существование департамента
-	dept, err := s.deptRepo.GetByID(ctx, deptID)
-	if err != nil || dept == nil {
-		return nil, errors.New("department not found")
+	_, err := findDepartment(ctx, s.deptRepo, deptID)
+	if err != nil {
+		return nil, err
 	}
 	fullName, err := validateString(input.FullName, 200)
 	if err != nil {

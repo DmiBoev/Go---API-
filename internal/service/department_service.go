@@ -2,43 +2,46 @@ package service
 
 import (
 	"context"
+	"dept-api/internal/domain"
 	"dept-api/internal/models"
 	"dept-api/internal/repository"
-	"errors"
 	"fmt"
 	"strings"
-
-	"gorm.io/gorm"
+	"unicode/utf8"
 )
 
 type DepartmentService interface {
-	Create(ctx context.Context, input models.CreateDepartmentInput) (*models.Department, error)
-	GetByID(ctx context.Context, id uint, depth int, includeEmployees bool) (*models.Department, error)
-	Update(ctx context.Context, id uint, input models.UpdateDepartmentInput) (*models.Department, error)
-	Delete(ctx context.Context, id uint, mode string, reassignTo *uint) error
+	Create(context.Context, models.CreateDepartmentInput) (*models.Department, error)
+	GetByID(context.Context, uint, int, bool) (*models.Department, error)
+	Update(context.Context, uint, models.UpdateDepartmentInput) (*models.Department, error)
+	Delete(context.Context, uint, string, *uint) error
 }
 
 type departmentService struct {
 	deptRepo repository.DepartmentRepository
-	empRepo  repository.EmployeeRepository
-	db       *gorm.DB
 }
 
-func NewDepartmentService(db *gorm.DB, deptRepo repository.DepartmentRepository, empRepo repository.EmployeeRepository) DepartmentService {
-	return &departmentService{
-		deptRepo: deptRepo,
-		empRepo:  empRepo,
-		db:       db,
-	}
+func NewDepartmentService(deptRepo repository.DepartmentRepository) DepartmentService {
+	return &departmentService{deptRepo: deptRepo}
 }
 
-// validateString общая валидация строк
 func validateString(field string, maxLen int) (string, error) {
 	trimmed := strings.TrimSpace(field)
-	if trimmed == "" || len(trimmed) > maxLen {
-		return "", fmt.Errorf("длина должна быть от 1 до %d символов", maxLen)
+	if trimmed == "" || utf8.RuneCountInString(trimmed) > maxLen {
+		return "", fmt.Errorf("%w: length must be between 1 and %d characters", domain.ErrInvalid, maxLen)
 	}
 	return trimmed, nil
+}
+
+func findDepartment(ctx context.Context, repo repository.DepartmentRepository, id uint) (*models.Department, error) {
+	dept, err := repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if dept == nil {
+		return nil, fmt.Errorf("%w: department not found", domain.ErrNotFound)
+	}
+	return dept, nil
 }
 
 func (s *departmentService) Create(ctx context.Context, input models.CreateDepartmentInput) (*models.Department, error) {
@@ -47,79 +50,60 @@ func (s *departmentService) Create(ctx context.Context, input models.CreateDepar
 		return nil, err
 	}
 	if input.ParentID != nil {
-		parent, err := s.deptRepo.GetByID(ctx, *input.ParentID)
-		if err != nil || parent == nil {
-			return nil, errors.New("parent department not found")
+		if _, err := findDepartment(ctx, s.deptRepo, *input.ParentID); err != nil {
+			return nil, err
 		}
 	}
-	dept := &models.Department{
-		Name:     name,
-		ParentID: input.ParentID,
-	}
-	err = s.deptRepo.Create(ctx, dept)
-	if err != nil {
-		// GORM может вернуть ошибку уникальности, но здесь она будет обёрнута
+	dept := &models.Department{Name: name, ParentID: input.ParentID}
+	if err := s.deptRepo.Create(ctx, dept); err != nil {
 		return nil, err
 	}
 	return dept, nil
 }
 
 func (s *departmentService) GetByID(ctx context.Context, id uint, depth int, includeEmployees bool) (*models.Department, error) {
-	if depth < 1 {
-		depth = 1
-	}
-	if depth > 5 {
-		depth = 5
-	}
+	depth = max(1, min(depth, 5))
 	tree, err := s.deptRepo.GetChildrenRecursive(ctx, id, depth, includeEmployees)
 	if err != nil {
 		return nil, err
 	}
 	if tree == nil {
-		return nil, errors.New("department not found")
+		return nil, fmt.Errorf("%w: department not found", domain.ErrNotFound)
 	}
 	return tree, nil
 }
 
 func (s *departmentService) Update(ctx context.Context, id uint, input models.UpdateDepartmentInput) (*models.Department, error) {
-	dept, err := s.deptRepo.GetByID(ctx, id)
-	if err != nil || dept == nil {
-		return nil, errors.New("department not found")
-	}
-
-	// Валидация имени
-	if input.Name != nil {
-		trimmed, err := validateString(*input.Name, 200)
+	var dept *models.Department
+	err := s.deptRepo.WithinTransaction(ctx, func(repo repository.DepartmentRepository) error {
+		var err error
+		dept, err = findDepartment(ctx, repo, id)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		input.Name = &trimmed
-		dept.Name = trimmed
-	}
-
-	// Обработка parent_id с проверками
-	if input.ParentID != nil {
-		if *input.ParentID == id {
-			return nil, errors.New("department cannot be its own parent")
+		if input.Name != nil {
+			dept.Name, err = validateString(*input.Name, 200)
+			if err != nil {
+				return err
+			}
 		}
-		parent, err := s.deptRepo.GetByID(ctx, *input.ParentID)
-		if err != nil || parent == nil {
-			return nil, errors.New("new parent not found")
+		if input.ParentID != nil {
+			if *input.ParentID == id {
+				return fmt.Errorf("%w: department cannot be its own parent", domain.ErrInvalid)
+			}
+			if _, err := findDepartment(ctx, repo, *input.ParentID); err != nil {
+				return err
+			}
+			cyclic, err := repo.CheckCyclicMove(ctx, id, *input.ParentID)
+			if err != nil {
+				return err
+			}
+			if cyclic {
+				return fmt.Errorf("%w: cannot move department inside its own descendant", domain.ErrConflict)
+			}
+			dept.ParentID = input.ParentID
 		}
-		// Циклическая проверка
-		cyclic, err := s.deptRepo.CheckCyclicMove(ctx, id, *input.ParentID)
-		if err != nil {
-			return nil, err
-		}
-		if cyclic {
-			return nil, errors.New("cannot move department inside its own descendant")
-		}
-		dept.ParentID = input.ParentID
-	}
-
-	// Используем транзакцию для обновления (из-за уникальности индекса)
-	err = s.db.Transaction(func(tx *gorm.DB) error {
-		return s.deptRepo.Update(ctx, dept)
+		return repo.Update(ctx, dept)
 	})
 	if err != nil {
 		return nil, err
@@ -128,35 +112,28 @@ func (s *departmentService) Update(ctx context.Context, id uint, input models.Up
 }
 
 func (s *departmentService) Delete(ctx context.Context, id uint, mode string, reassignTo *uint) error {
-	dept, err := s.deptRepo.GetByID(ctx, id)
-	if err != nil || dept == nil {
-		return errors.New("department not found")
+	if mode != "" && mode != "cascade" && mode != "reassign" {
+		return fmt.Errorf("%w: mode must be cascade or reassign", domain.ErrInvalid)
 	}
-	if mode == "reassign" {
-		if reassignTo == nil {
-			return errors.New("reassign_to_department_id is required")
-		}
-		target, err := s.deptRepo.GetByID(ctx, *reassignTo)
-		if err != nil || target == nil {
-			return errors.New("target department not found")
-		}
-		err = s.db.Transaction(func(tx *gorm.DB) error {
-			// Перемещаем сотрудников
-			if err := s.deptRepo.ReassignEmployees(ctx, id, *reassignTo); err != nil {
-				return err
-			}
-			// Поднимаем дочерние подразделения на уровень родителя удаляемого
-			if err := s.deptRepo.ReassignChildrenParent(ctx, &id, dept.ParentID); err != nil {
-				return err
-			}
-			// Удаляем сам департамент
-			if err := s.deptRepo.Delete(ctx, id); err != nil {
-				return err
-			}
-			return nil
-		})
-		return err
+	if mode == "reassign" && (reassignTo == nil || *reassignTo == id) {
+		return fmt.Errorf("%w: a different reassign_to_department_id is required", domain.ErrInvalid)
 	}
-	// cascade
-	return s.deptRepo.Delete(ctx, id)
+	return s.deptRepo.WithinTransaction(ctx, func(repo repository.DepartmentRepository) error {
+		dept, err := findDepartment(ctx, repo, id)
+		if err != nil {
+			return err
+		}
+		if mode == "reassign" {
+			if _, err := findDepartment(ctx, repo, *reassignTo); err != nil {
+				return err
+			}
+			if err := repo.ReassignEmployees(ctx, id, *reassignTo); err != nil {
+				return err
+			}
+			if err := repo.ReassignChildrenParent(ctx, &id, dept.ParentID); err != nil {
+				return err
+			}
+		}
+		return repo.Delete(ctx, id)
+	})
 }
